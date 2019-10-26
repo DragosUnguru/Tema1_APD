@@ -25,12 +25,6 @@
 #define PI 3.14159265358979323846
 #define MIN(x, y) ((x < y) ? x : y)
 
-typedef struct _args {
-	double complex* in_buf;
-	double complex* out_buf;
-	int step;
-} args_t;
-
 double complex* data;
 double complex* freqs;
 int n, P;
@@ -82,6 +76,16 @@ void flush_output(char* file_name, double complex* out_data) {
 	fclose(fout_ptr);
 }
 
+void compute_missing_call(double complex* in, int step, int offset) {
+	double complex* out = (in == data) ? freqs : data;
+	
+	for (int i = 0; i < n; i += 2 * step) {
+		double complex t = cexp(-I * PI * i / n) * out[i + step + offset];
+		in[i / 2 + offset]     = out[i + offset] + t;
+		in[(i + n) / 2 + offset] = out[i + offset] - t;
+	}
+}
+
 void _fft(double complex* in, double complex* out, int step)
 {
 	if (step < n) {
@@ -96,139 +100,56 @@ void _fft(double complex* in, double complex* out, int step)
 	}
 }
 
-// void* _fft(void* args) {
-// 	args_t params = *(args_t*) args;
-// 	args_t reversed_parms;
-// 	args_t offset_params;
-
-// 	if (params.step < n) {
-// 		reversed_parms.in_buf = params.out_buf;
-// 		reversed_parms.out_buf = params.in_buf;
-// 		reversed_parms.step = params.step << 1;
-// 		_fft(&reversed_parms);
-
-// 		offset_params.in_buf = params.out_buf + params.step;
-// 		offset_params.out_buf = params.in_buf + params.step;
-// 		offset_params.step = params.step << 1;
-// 		_fft(&offset_params);
- 
-// 		for (int i = 0; i < n; i += 2 * params.step) {
-// 			double complex t = cexp(-I * PI * i / n) * params.out_buf[i + params.step];
-// 			params.in_buf[i / 2]     = params.out_buf[i] + t;
-// 			params.in_buf[(i + n)/2] = params.out_buf[i] - t;
-// 		}
-// 	}
-
-// 	return NULL;
-// }
  
 void* fft(void* args) {
-	int i, step;
 	int thread_id = *(int*) args;
- 
-	switch (P) {
-	case 1:
-		_fft(data, freqs, 1);
-		break;
-	case 2:
-		if (thread_id == 0) {
-			_fft(freqs, data, 2);
-		} else {
-			_fft(freqs + 1, data + 1, 2);
-		}
-		break;
-	case 4:
-		if (thread_id == 0) {
-			_fft(data, freqs, 4);
-		}
-		else if (thread_id == 1) {
-			_fft(data + 2, freqs + 2, 4);
-		}
-		else if (thread_id == 2) {
-			_fft(data + 1, freqs + 1, 4);
-		}
-		else if (thread_id == 3) {
-			_fft(data + 3, freqs + 3, 4);
-		}
-	default:
-		break;
-	}
 
-	return NULL;
+	/*
+		For 2 threads, we start with 1 recursive call ahead,
+		so we switch pointers
+	*/
+	double complex* in = (P == 2) ? freqs : data;
+	double complex* out = (P == 2) ? data : freqs;
+
+	_fft(in + thread_id, out + thread_id, P);
+ 
+ 	return NULL;
 }
 
 void execute(int argc, char * argv[]) {
 	P = atoi(argv[3]);
 
-	// double complex* save_in;
-	// double complex* save_out;
 	pthread_t tid[P];
 	int thread_id[P];
-	// args_t thread_args;
 	int i;
 
 	parse_input(argc, argv);
 
-	// Manage args for threaded function
-	// thread_args.in_buf = (double complex*) malloc (n * sizeof(double complex));
-	// thread_args.out_buf = (double complex*) malloc (n * sizeof(double complex));
-	// thread_args.step = 1;
-	// for (i = 0; i < n; i++) {
-	// 	thread_args.in_buf[i] = thread_args.out_buf[i] = data[i];
-	// }
-
-	// save_in = thread_args.in_buf;
-	// save_out = thread_args.out_buf;
-
+	// Parallelize
 	for (i = 0; i < P; ++i) {
 		thread_id[i] = i;
 		pthread_create(tid + i, NULL, fft, thread_id + i);
-
-		// Swap pointers, manage step and move starting pointer;
-		// double complex* tmp = thread_args.in_buf + thread_args.step;
-		// thread_args.in_buf = thread_args.out_buf + thread_args.step;
-		// thread_args.out_buf = tmp;
-		// thread_args.step <<= 1;
 	}
 	for(i = 0; i < P; i++) {
 		pthread_join(tid[i], NULL);
 	}
 
+	// Compute for skipped recursive calls
 	if (P == 2) {
-		// Merge
-		for (int i = 0; i < n; i += 2) {
-			double complex t = cexp(-I * PI * i / n) * freqs[i + 1];
-			data[i / 2]     = freqs[i] + t;
-			data[(i + n)/2] = freqs[i] - t;
-		}
+		compute_missing_call(data, 1, 0);
 	}
 	else if (P == 4) {
-		// Merge
-		for (int i = 0; i < n; i += 4) {
-			double complex t = cexp(-I * PI * i / n) * data[i + 2];
-			freqs[i / 2]     = data[i] + t;
-			freqs[(i + n)/2] = data[i] - t;
-		}
-		for (int i = 0; i < n; i += 4) {
-			double complex t = cexp(-I * PI * i / n) * data[i + 1 + 2];
-			freqs[i / 2 + 1]     = data[i + 1] + t;
-			freqs[(i + n) / 2 + 1] = data[i + 1] - t;
-		}
-		
-		for (int i = 0; i < n; i += 2) {
-			double complex t = cexp(-I * PI * i / n) * freqs[i + 1];
-			data[i / 2]     = freqs[i] + t;
-			data[(i + n)/2] = freqs[i] - t;
-		}
+		compute_missing_call(freqs, 2, 0);
+		compute_missing_call(freqs, 2, 1);
+		compute_missing_call(data, 1, 0);
 	}
 
+	// Print output into file
 	flush_output(argv[2], data);
 	
 	// Free memory
 	free(data);
 	free(freqs);
-	// free(save_in);
-	// free(save_out);
 }
 
 int main(int argc, char * argv[]) {
